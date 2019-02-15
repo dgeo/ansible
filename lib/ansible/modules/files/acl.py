@@ -85,6 +85,16 @@ options:
     choices: [ default, mask, no_mask ]
     default: default
     version_added: '2.7'
+  nfsv4_inherit_flags:
+    description:
+    - NFSv4 ONLY
+    - Inheritance flags can be C(f), C(d), C(i), C(n), C(I) (file_inherit, dir_inherit, inherit_only, no_propagate, inherited)
+    version_added: "2.7"
+  nfsv4_acl_type:
+    description:
+    - NFSv4 ONLY
+    - can be C(allow) or C(deny)
+    default: 'allow'
 author:
 - Brian Coca (@bcoca)
 - Jérémie Astori (@astorije)
@@ -174,17 +184,25 @@ def split_entry(entry):
 
     return [d, t, e, p]
 
+def split_nfsv4_entry(entry):
+    ''' splits NFSv4 entry and ensures normalized return'''
 
-def build_entry(etype, entity, permissions=None, use_nfsv4_acls=False):
+    a = entry.split(':')
+
+    t, e, p, rf, at = a
+
+    return [t, e, p, rf, at]
+
+def build_entry(etype, entity, permissions=None):
     '''Builds and returns an entry string. Does not include the permissions bit if they are not provided.'''
-    if use_nfsv4_acls:
-        return ':'.join([etype, entity, permissions, 'allow'])
-
     if permissions:
         return etype + ':' + entity + ':' + permissions
 
     return etype + ':' + entity
 
+def build_nfsv4_entry(etype, entity, permissions='', inherit_flags='', acl_type='allow'):
+    '''Builds and returns an NFSv4 entry'''
+    return ':'.join([etype, entity, permissions, inherit_flags, acl_type])
 
 def build_command(module, mode, path, follow, default, recursive, recalculate_mask, entry=''):
     '''Builds and returns a getfacl/setfacl command.'''
@@ -281,7 +299,9 @@ def main():
                 default='default',
                 choices=['default', 'mask', 'no_mask'],
             ),
-            use_nfsv4_acls=dict(type='bool', default=False)
+            use_nfsv4_acls=dict(type='bool', default=False),
+            nfsv4_inherit_flags=dict(type='str', default=''),
+            nfsv4_acl_type=dict(type='str', default='allow')
         ),
         supports_check_mode=True,
     )
@@ -300,6 +320,8 @@ def main():
     recursive = module.params.get('recursive')
     recalculate_mask = module.params.get('recalculate_mask')
     use_nfsv4_acls = module.params.get('use_nfsv4_acls')
+    nfsv4_inherit_flags = module.params.get('nfsv4_inherit_flags')
+    nfsv4_acl_type = module.params.get('nfsv4_acl_type')
 
     if not os.path.exists(path):
         module.fail_json(msg="Path not found or not accessible.")
@@ -325,8 +347,11 @@ def main():
         if etype or entity or permissions:
             module.fail_json(msg="'entry' MUST NOT be set when 'entity', 'etype' or 'permissions' are set.")
 
-        if state == 'present' and not entry.count(":") in [2, 3]:
-            module.fail_json(msg="'entry' MUST have 3 or 4 sections divided by ':' when 'state=present'.")
+        if state == 'present':
+            if use_nfsv4_acls and not entry.count(":") == 4:
+                module.fail_json(msg="'entry' MUST have 5 sections divided by ':' when 'state=present'.")
+            elif not use_nfsv4_acls and not entry.count(":") in [2, 3]:
+                module.fail_json(msg="'entry' MUST have 3 or 4 sections divided by ':' when 'state=present'.")
 
         if state == 'absent' and not entry.count(":") in [1, 2]:
             module.fail_json(msg="'entry' MUST have 2 or 3 sections divided by ':' when 'state=absent'.")
@@ -334,9 +359,13 @@ def main():
         if state == 'query':
             module.fail_json(msg="'entry' MUST NOT be set when 'state=query'.")
 
-        default_flag, etype, entity, permissions = split_entry(entry)
-        if default_flag is not None:
-            default = default_flag
+        if use_nfsv4_acls:
+            etype, entity, permissions, nfsv4_inherit_flags, nfsv4_acl_type = split_nfsv4_entry(entry)
+        else:
+            default_flag, etype, entity, permissions = split_entry(entry)
+
+            if default_flag is not None:
+                default = default_flag
 
     if get_platform().lower() == 'freebsd':
         if recursive:
@@ -346,7 +375,11 @@ def main():
     msg = ""
 
     if state == 'present':
-        entry = build_entry(etype, entity, permissions, use_nfsv4_acls)
+        if use_nfsv4_acls:
+            entry = build_nfsv4_entry(etype, entity, permissions, nfsv4_inherit_flags, nfsv4_acl_type)
+        else:
+            entry = build_entry(etype, entity, permissions)
+
         command = build_command(
             module, 'set', path, follow,
             default, recursive, recalculate_mask, entry
@@ -358,7 +391,11 @@ def main():
         msg = "%s is present" % entry
 
     elif state == 'absent':
-        entry = build_entry(etype, entity, use_nfsv4_acls)
+        if use_nfsv4_acls:
+            entry = build_nfsv4_entry(etype, entity, permissions, nfsv4_inherit_flags, nfsv4_acl_type)
+        else:
+            entry = build_entry(etype, entity)
+
         command = build_command(
             module, 'rm', path, follow,
             default, recursive, recalculate_mask, entry
